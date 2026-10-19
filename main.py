@@ -403,14 +403,16 @@ class LiveDashboard:
         self._set_blit_artists([self.line_fd, self.dot_fd, self.line_ft])
         self._redraw(full=True)
 
-    def update_material(self, t, depth, f_act):
+    def update_material(self, depth, f_act, k_hat=None, t=None):
         self.f_peak = max(self.f_peak, f_act)
         self.n_samples += 1
         if self.n_samples % self.PLOT_EVERY == 0:
-            self.times.append(t)
+            self.times.append(float(t if t is not None else self.n_samples * DT))
             self.depths.append(1e3 * depth)        # plotted in mm
             self.forces.append(f_act)
             self._redraw()
+        if k_hat is not None:
+            self.finish_sample(k_hat)
 
     def finish_sample(self, k_fit):
         """Overlay the least-squares fit F = k d on the current loading curve."""
@@ -730,7 +732,7 @@ def run_writing_task(world, ctrl, controller_mode, f_desired, gui=False, save_di
     return summary, arr
 
 
-def probe_material(world, ctrl, pad_id, pad_top_z, xy, save_dir, tag, fixed_penetration=0.010, settle_duration=3.0, dashboard=None):
+def probe_material(world, ctrl, pad_id, pad_top_z, xy, save_dir, tag, fixed_penetration=0.010, settle_duration=3.0, live=False, dashboard=None):
     gains = dict(K_trans=np.array([600., 600., 600.]), K_rot=np.array([30., 30., 30.]), damping_ratio=1.8)
     just_touching_z = pad_top_z + TOOL_RADIUS
     target = np.array([xy[0], xy[1], just_touching_z - fixed_penetration])
@@ -741,6 +743,9 @@ def probe_material(world, ctrl, pad_id, pad_top_z, xy, save_dir, tag, fixed_pene
     world.arm.sync_tool_pose()
 
     traj = MinJerkTrajectory(hover, target, APPROACH_DURATION)
+    owns_dashboard = dashboard is None and live
+    if owns_dashboard:
+        dashboard = LiveDashboard(mode="material")
     if dashboard:
         dashboard.start_sample(tag, t_total=APPROACH_DURATION + settle_duration)
     logger = TrialLogger()
@@ -758,7 +763,7 @@ def probe_material(world, ctrl, pad_id, pad_top_z, xy, save_dir, tag, fixed_pene
         depth = max(0.0, just_touching_z - tool_pos[2])     # measured penetration of the tip
         logger.record(t, tool_pos, pos_des, force=force, force_des=0.0, torque=torque)
         if dashboard:
-            dashboard.update_material(t, depth, force[2])
+            dashboard.update_material(depth, force[2], t=t)
         t += DT
 
     arr = logger.arrays()
@@ -780,6 +785,8 @@ def probe_material(world, ctrl, pad_id, pad_top_z, xy, save_dir, tag, fixed_pene
         touching = d_meas > 1e-4
         dm, fm = d_meas[touching], forces[touching]
         dashboard.finish_sample(float(dm @ fm / (dm @ dm)) if dm.size else 0.0)
+        if owns_dashboard:
+            dashboard.close(wait=True)
 
     os.makedirs(save_dir, exist_ok=True)
     steady_force = float(np.percentile(forces[-max(int(2.0/DT), 5):], 75))
@@ -837,6 +844,12 @@ def hold_gui(gui):
             time.sleep(5)
 
 
+def disconnect_world(world):
+    """Disconnect only while the PyBullet client is still active."""
+    if p.isConnected(physicsClientId=world.cid):
+        world.disconnect()
+
+
 def run_part2_writing(gui=False, save_dir="outputs/part3", f_desired=F_DESIRED, word="Robot", pattern="circle", live=False, pen_lifts=False):
     print("--- Part 2 (continued): Impedance Writing ---")
     world = build_world(gui=gui)
@@ -844,7 +857,7 @@ def run_part2_writing(gui=False, save_dir="outputs/part3", f_desired=F_DESIRED, 
     ctrl = CartesianImpedanceController(world.arm)
     s, _ = run_writing_task(world, ctrl, "impedance", f_desired, gui=gui, save_dir=save_dir, tag="part3_impedance", word=word, pattern=pattern, live=live, pen_lifts=pen_lifts)
     hold_gui(gui)
-    world.disconnect()
+    disconnect_world(world)
     return s
 
 def run_part2_writing_admittance(gui=False, save_dir="outputs/part4", f_desired=F_DESIRED, word="Robot", pattern="circle", live=False, pen_lifts=False):
@@ -854,7 +867,7 @@ def run_part2_writing_admittance(gui=False, save_dir="outputs/part4", f_desired=
     ctrl = CartesianImpedanceController(world.arm)
     s, _ = run_writing_task(world, ctrl, "admittance", f_desired, gui=gui, save_dir=save_dir, tag="part4_admittance", word=word, pattern=pattern, live=live, pen_lifts=pen_lifts)
     hold_gui(gui)
-    world.disconnect()
+    disconnect_world(world)
     return s
 
 def run_part3(save_dir="outputs/part5", gui=False, word="Robot", pattern="circle", live=False, pen_lifts=False):
@@ -893,14 +906,14 @@ def run_part4(gui=False, save_dir="outputs/part6", live=False):
     if dashboard:
         dashboard.close(wait=True)
     hold_gui(gui)
-    world.disconnect()
+    disconnect_world(world)
     return results
 
 def main():
     parser = argparse.ArgumentParser(description="Force-Controlled Writing")
     parser.add_argument("--part", choices=["1", "2", "3", "4", "5", "all"], default="all")
     parser.add_argument("--gui", action="store_true")
-    parser.add_argument("--word", type=str, default="Ravi", help="Word to write")
+    parser.add_argument("--word", type=str, default="Robot", help="Word to write")
     parser.add_argument("--pattern", type=str, default="circle", help="Pattern to draw")
     parser.add_argument("--live", action="store_true", help="Enable live dashboard visualization")
     parser.add_argument("--pen-lifts", action="store_true",
